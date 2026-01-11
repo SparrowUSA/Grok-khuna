@@ -1,35 +1,40 @@
 import os
 import sys
-import subprocess
-
-# ============================================================================
-# FORCE INSTALL TgCrypto IF MISSING (Critical for Railway)
-# ============================================================================
-try:
-    import TgCrypto
-    print("✓ TgCrypto is installed - Fast encryption enabled")
-except ImportError:
-    print("⚠️ Installing TgCrypto for better performance...")
-    try:
-        # Method 1: Install specific version
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "TgCrypto==1.2.5"])
-        print("✓ TgCrypto 1.2.5 installed successfully")
-        
-        # Verify installation
-        import TgCrypto
-        print("✓ TgCrypto verification passed")
-    except Exception as e:
-        print(f"✗ Failed to install TgCrypto: {e}")
-        print("⚠️ Bot will run slower but will still work")
-
-# ============================================================================
-# NOW CONTINUE WITH IMPORTS
-# ============================================================================
 import asyncio
 import logging
 import signal
 import time
 from urllib.parse import urlparse
+
+# Try to import and install missing packages
+try:
+    import pyrogram
+    print(f"✓ Pyrogram {pyrogram.__version__}")
+except ImportError:
+    print("❌ Pyrogram not found - installing...")
+    import subprocess
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "pyrogram==2.0.106"])
+    import pyrogram
+
+try:
+    import tgcrypto
+    print("✓ TgCrypto installed")
+except ImportError:
+    print("❌ TgCrypto not found - installing...")
+    import subprocess
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "tgcrypto==1.2.5"])
+    import tgcrypto
+
+try:
+    import aiohttp
+    print(f"✓ aiohttp {aiohttp.__version__}")
+except ImportError:
+    print("❌ aiohttp not found - installing...")
+    import subprocess
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "aiohttp==3.9.5"])
+    import aiohttp
+
+# Now import from installed packages
 from pyrogram import Client, filters, errors
 from pyrogram.types import Message
 from aiohttp import web
@@ -45,15 +50,13 @@ logging.basicConfig(
 logger = logging.getLogger("userbot")
 
 # ============================================================================
-# CONFIG FROM ENVIRONMENT (Railway)
+# CONFIG FROM ENVIRONMENT
 # ============================================================================
 SESSION_STRING = os.getenv("SESSION_STRING")
 API_ID = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
 PORT = int(os.getenv("PORT", 8080))
-HEALTH_CHECK_PATH = os.getenv("HEALTH_CHECK_PATH", "/health")
 
-# Validate required environment variables
 if not SESSION_STRING:
     logger.critical("❌ SESSION_STRING is required! Add it in Railway Variables.")
     sys.exit(1)
@@ -62,7 +65,7 @@ if not SESSION_STRING:
 # CLIENT INITIALIZATION
 # ============================================================================
 app = Client(
-    name="restricted_forwarder",
+    name="railway_forwarder",
     session_string=SESSION_STRING,
     api_id=int(API_ID) if API_ID else None,
     api_hash=API_HASH if API_HASH else None,
@@ -71,23 +74,23 @@ app = Client(
 )
 
 # ============================================================================
-# HEALTH CHECK SERVER (Required for Railway)
+# HEALTH CHECK SERVER
 # ============================================================================
 async def health_check(request):
     """Health check endpoint for Railway"""
     return web.Response(text="OK", status=200)
 
 async def start_health_server():
-    """Start HTTP server for health checks"""
+    """Start HTTP server for Railway health checks"""
     server = web.Application()
-    server.router.add_get(HEALTH_CHECK_PATH, health_check)
+    server.router.add_get("/health", health_check)
     server.router.add_get("/", health_check)
     
     runner = web.AppRunner(server)
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', PORT)
     await site.start()
-    logger.info(f"✅ Health check server running on port {PORT}")
+    logger.info(f"✅ Health server running on port {PORT}")
     return runner
 
 # ============================================================================
@@ -97,30 +100,33 @@ async def start_health_server():
 def parse_tg_link(link: str) -> tuple:
     """Parse Telegram link to get channel ID and message ID"""
     try:
-        # Remove any whitespace
         link = link.strip()
         
         # Handle t.me/c/123456789/100 format
         if "/c/" in link:
             parts = link.split("/")
-            channel_part = parts[parts.index("c") + 1]
-            message_id = parts[-1]
-            channel_id = int(f"-100{channel_part}")
-        else:
-            # Handle other formats
-            parsed = urlparse(link)
-            path = parsed.path.strip('/').split('/')
-            
-            if len(path) >= 2:
-                if path[0] == 'c' and len(path) >= 3:
-                    channel_id = int(f"-100{path[1]}")
-                    message_id = int(path[2])
-                else:
-                    # Public channel or username
-                    channel_id = path[0]
-                    message_id = int(path[1])
+            # Find index of 'c' and get next part
+            c_index = parts.index("c") if "c" in parts else -1
+            if c_index != -1 and c_index + 1 < len(parts):
+                channel_part = parts[c_index + 1]
+                message_id = parts[-1] if parts[-1].isdigit() else "1"
+                channel_id = int(f"-100{channel_part}")
+                return channel_id, int(message_id)
+        
+        # Try URL parsing
+        parsed = urlparse(link)
+        path = parsed.path.strip('/').split('/')
+        
+        if len(path) >= 2:
+            if path[0] == 'c' and len(path) >= 3:
+                channel_id = int(f"-100{path[1]}")
+                message_id = int(path[2])
             else:
-                raise ValueError("Invalid link format")
+                # For public channels
+                channel_id = path[0]
+                message_id = int(path[1]) if len(path) > 1 else 1
+        else:
+            raise ValueError("Invalid link format")
         
         return channel_id, int(message_id)
     except Exception as e:
@@ -134,7 +140,7 @@ async def process_message(client: Client, channel_id: int, msg_id: int):
         if not msg or msg.empty:
             return False, f"Message {msg_id} not found"
         
-        logger.info(f"Processing message {msg_id}")
+        logger.info(f"📨 Processing message {msg_id}")
         
         # Text message
         if msg.text:
@@ -147,7 +153,7 @@ async def process_message(client: Client, channel_id: int, msg_id: int):
             file_path = await client.download_media(msg)
             
             if not file_path:
-                return False, f"Failed to download media {msg_id}"
+                return False, f"Failed to download {msg_id}"
             
             try:
                 # Upload based on type
@@ -160,7 +166,7 @@ async def process_message(client: Client, channel_id: int, msg_id: int):
                 elif msg.audio:
                     await client.send_audio("me", file_path, caption=msg.caption)
                 else:
-                    return False, f"Unsupported media type: {msg_id}"
+                    return False, f"Unsupported media: {msg_id}"
                 
                 return True, f"Media forwarded: {msg_id}"
                 
@@ -169,15 +175,15 @@ async def process_message(client: Client, channel_id: int, msg_id: int):
                 if file_path and os.path.exists(file_path):
                     os.remove(file_path)
         else:
-            return False, f"No processable content: {msg_id}"
+            return False, f"No content: {msg_id}"
             
     except errors.FloodWait as fw:
-        logger.warning(f"Flood wait: {fw.value} seconds")
+        logger.warning(f"⏳ Flood wait: {fw.value}s")
         await asyncio.sleep(fw.value)
         return await process_message(client, channel_id, msg_id)
     except Exception as e:
-        logger.error(f"Error processing {msg_id}: {e}")
-        return False, f"Error: {str(e)}"
+        logger.error(f"❌ Error {msg_id}: {e}")
+        return False, f"Error: {str(e)[:100]}"
 
 # ============================================================================
 # COMMAND HANDLERS
@@ -192,7 +198,7 @@ async def single_forward(client: Client, message: Message):
     
     try:
         channel_id, msg_id = parse_tg_link(message.command[1])
-        status_msg = await message.reply(f"🔄 Processing message {msg_id}...")
+        status_msg = await message.reply(f"🔄 Processing {msg_id}...")
         
         success, result = await process_message(client, channel_id, msg_id)
         
@@ -208,7 +214,7 @@ async def single_forward(client: Client, message: Message):
 async def batch_forward(client: Client, message: Message):
     """Forward a range of messages"""
     if len(message.command) < 3:
-        await message.reply("❓ Usage: /batch start_link end_link")
+        await message.reply("❓ Usage: /batch https://t.me/c/xxxx/1 https://t.me/c/xxxx/10")
         return
     
     try:
@@ -216,14 +222,14 @@ async def batch_forward(client: Client, message: Message):
         end_ch, end_id = parse_tg_link(message.command[2])
         
         if start_ch != end_ch:
-            await message.reply("❌ Both links must be from same channel")
+            await message.reply("❌ Links must be from same channel")
             return
         
         if start_id > end_id:
             start_id, end_id = end_id, start_id
         
         total = end_id - start_id + 1
-        status_msg = await message.reply(f"📦 Batch: {start_id}→{end_id} ({total} messages)")
+        status_msg = await message.reply(f"📦 Batch: {start_id}→{end_id} ({total} msgs)")
         
         success_count = 0
         for idx, mid in enumerate(range(start_id, end_id + 1), 1):
@@ -231,20 +237,19 @@ async def batch_forward(client: Client, message: Message):
             if success:
                 success_count += 1
             
-            # Update progress every 10 messages
-            if idx % 10 == 0:
+            # Update progress
+            if idx % 10 == 0 or idx == total:
+                progress = (idx / total) * 100
                 await status_msg.edit_text(
-                    f"📦 Progress: {idx}/{total}\n"
-                    f"✅ Success: {success_count}/{idx}"
+                    f"📦 Progress: {idx}/{total} ({progress:.1f}%)\n"
+                    f"✅ Success: {success_count}"
                 )
             
-            # Anti-flood delay
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(1.5)  # Anti-flood
         
         await status_msg.edit_text(
             f"📦 Batch complete!\n"
-            f"✅ {success_count}/{total} successful\n"
-            f"⚡ {success_count/total*100:.1f}% success rate"
+            f"✅ {success_count}/{total} successful"
         )
         
     except Exception as e:
@@ -258,16 +263,15 @@ async def status_command(client: Client, message: Message):
     minutes = int((uptime % 3600) // 60)
     
     status_text = (
-        f"🤖 **UserBot Status**\n"
+        f"🤖 **Railway UserBot**\n"
         f"├ User: {client.me.first_name}\n"
         f"├ ID: `{client.me.id}`\n"
         f"├ Uptime: {hours}h {minutes}m\n"
-        f"├ Platform: Railway\n"
-        f"└ Health: ✅ Online\n\n"
+        f"└ Status: ✅ Online\n\n"
         f"**Commands:**\n"
-        f"• `/forward link` - Forward single message\n"
-        f"• `/batch start end` - Forward multiple\n"
-        f"• `/status` - Show this status"
+        f"• `/forward link` - Forward message\n"
+        f"• `/batch start end` - Forward range\n"
+        f"• `/status` - Check status"
     )
     
     await message.reply(status_text)
@@ -282,20 +286,21 @@ async def main():
     global start_time
     start_time = time.time()
     
-    # Start health check server
+    # Start health server
     health_server = await start_health_server()
     
-    # Start Pyrogram client
+    # Start Telegram client
     await app.start()
     me = await app.get_me()
-    logger.info(f"✅ Userbot STARTED | {me.first_name} (@{me.username})")
+    logger.info(f"✅ Userbot STARTED: {me.first_name} (@{me.username})")
     
-    # Send startup notification
+    # Startup notification
     await app.send_message(
         "me",
-        f"🤖 **UserBot Started!**\n"
+        f"🤖 **Railway UserBot Started**\n"
         f"Time: {time.ctime()}\n"
         f"User: {me.first_name}\n"
+        f"ID: `{me.id}`\n\n"
         f"Ready to process commands!"
     )
     
@@ -312,27 +317,18 @@ async def main():
         except:
             signal.signal(sig, lambda s, f: signal_handler())
     
-    logger.info("🚀 Bot is running and ready...")
+    logger.info("🚀 Bot is running and ready for commands...")
     
     # Keep running
     await stop_event.wait()
     
     # Graceful shutdown
-    logger.info("👋 Shutting down...")
+    logger.info("👋 Shutting down gracefully...")
     await app.stop()
     await health_server.cleanup()
     logger.info("✅ Shutdown complete")
 
 if __name__ == "__main__":
-    # Install aiohttp if missing
-    try:
-        import aiohttp
-    except ImportError:
-        print("📦 Installing aiohttp...")
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "aiohttp==3.9.5"])
-        print("✅ aiohttp installed")
-    
-    # Run the bot
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
