@@ -1,0 +1,3 @@
+pyrogram
+tgcrypto          # much faster crypto & download/upload
+python-dotenv     # optional but useful
