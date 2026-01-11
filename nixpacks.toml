@@ -1,8 +1,11 @@
 [phases.setup]
-nixPkgs = ["python313", "python313Packages.pip"]
+nixPkgs = ["python313"]
 
 [phases.install]
-cmds = ["python -m pip install --upgrade pip", "pip install -r requirements.txt"]
+cmds = [
+  "python -m pip install --upgrade pip --quiet",
+  "pip install --no-cache-dir -r requirements.txt --quiet"
+]
 
 [start]
 cmd = "python userbot.py"
