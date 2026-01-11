@@ -1,34 +1,55 @@
-# userbot.py - Updated for better reliability on hosted platforms (Railway/Render) - Jan 2026
+# userbot.py - Optimized for Railway deployment
 import os
 import asyncio
 import logging
+import signal
+import time
 from urllib.parse import urlparse
-from pyrogram import Client, filters, errors
+from pyrogram import Client, filters, errors, idle
 from pyrogram.types import Message
+from aiohttp import web
 
-# ─── LOGGING SETUP (very helpful for debugging) ─────────────────────────────
+# ─── LOGGING SETUP ─────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s"
 )
 logger = logging.getLogger("pyrogram")
-logger.setLevel(logging.INFO)  # INFO or DEBUG
+logger.setLevel(logging.INFO)
 
-# ─── CONFIG FROM ENV ────────────────────────────────────────────────────────
+# ─── CONFIG FROM RAILWAY ENV ──────────────────────────────────────────────
 SESSION_STRING = os.getenv("SESSION_STRING")
 API_ID = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
+PORT = int(os.getenv("PORT", 8080))  # Railway provides PORT
+HEALTH_CHECK_PATH = os.getenv("HEALTH_CHECK_PATH", "/health")
 
 if not SESSION_STRING:
     raise ValueError("SESSION_STRING is required! Add it in Railway Variables.")
 
-# ─── CLIENT INIT ────────────────────────────────────────────────────────────
+# ─── CLIENT INIT ───────────────────────────────────────────────────────────
 app = Client(
     name="restricted_forwarder",
     session_string=SESSION_STRING,
     api_id=int(API_ID) if API_ID else None,
     api_hash=API_HASH if API_HASH else None,
+    in_memory=True,  # Important for Railway to avoid file system issues
 )
+
+# ─── HEALTH CHECK SERVER (Required for Railway) ───────────────────────────
+async def health_check(request):
+    return web.Response(text="OK", status=200)
+
+async def start_health_server():
+    """Start a simple HTTP server for Railway health checks"""
+    server = web.Application()
+    server.router.add_get(HEALTH_CHECK_PATH, health_check)
+    runner = web.AppRunner(server)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', PORT)
+    await site.start()
+    logger.info(f"Health check server running on port {PORT}")
+    return runner
 
 # ─── UTILITIES ──────────────────────────────────────────────────────────────
 
@@ -43,7 +64,7 @@ def parse_tg_link(link: str) -> tuple[int, int]:
 
 
 async def progress_callback(current: int, total: int):
-    if current % (total // 10) < 1:  # ~every 10%
+    if total > 0 and current % (total // 10) < 1:  # ~every 10%
         logger.info(f"Progress: {current * 100 / total:.1f}%")
 
 
@@ -147,19 +168,55 @@ async def batch_forward(client: Client, message: Message):
 # ─── START ──────────────────────────────────────────────────────────────────
 
 async def main():
+    # Start health check server first
+    health_server = await start_health_server()
+    
+    # Start Pyrogram client
     await app.start()
     me = await app.get_me()
     logger.info(f"Userbot STARTED | {me.first_name} (@{me.username})")
     
-    # Test message to confirm sending & wake updates
-    await app.send_message("me", "✅ Userbot online & listening\nSend /forward to test")
+    # Send startup notification
+    await app.send_message(
+        "me", 
+        f"✅ Userbot online on Railway!\n"
+        f"Username: @{me.username}\n"
+        f"Time: {time.ctime()}\n"
+        f"Send /forward to test"
+    )
     
-    # This is the key line for long-running userbots!
-    await app.idle()
+    # Set up graceful shutdown handler
+    stop_event = asyncio.Event()
     
-    logger.info("Shutting down...")
+    def signal_handler():
+        logger.info("Shutdown signal received from Railway")
+        stop_event.set()
+    
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            asyncio.get_running_loop().add_signal_handler(sig, signal_handler)
+        except NotImplementedError:
+            # Windows compatibility
+            signal.signal(sig, lambda s, f: signal_handler())
+    
+    # Keep the bot running until stop signal
+    logger.info("Bot is running and ready for commands...")
+    await stop_event.wait()
+    
+    # Graceful shutdown
+    logger.info("Performing graceful shutdown...")
+    await health_server.cleanup()
     await app.stop()
+    logger.info("Shutdown complete")
 
 
 if __name__ == "__main__":
+    # Install required dependencies for health check server
+    try:
+        import aiohttp
+    except ImportError:
+        logger.warning("aiohttp not found, installing...")
+        import subprocess
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "aiohttp"])
+    
     asyncio.run(main())
